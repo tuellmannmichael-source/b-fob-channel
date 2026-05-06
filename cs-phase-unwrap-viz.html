@@ -20,6 +20,9 @@
     .plot { width:100%; height:340px; margin-top:.75rem; }
     .note { color:var(--muted); font-size:.88rem; margin-top:.5rem; }
     .pill { font-family:ui-monospace,monospace; background:#21262d; padding:.15rem .45rem; border-radius:6px; font-size:.78rem; }
+    .doc-list { margin:.5rem 0 0 1.1rem; padding:0; }
+    .doc-list li { margin:.35rem 0; }
+    .callout { border-left:3px solid var(--accent); padding:.5rem 0 .5rem 1rem; margin:.75rem 0 0; background:#0d1117; border-radius:0 8px 8px 0; font-size:.9rem; }
   </style>
 </head>
 <body>
@@ -28,6 +31,17 @@
     <p class="note">Mirrors <span class="pill">cs_phase_unwrap.c</span> logic in JavaScript for exploration. Firmware uses the same two-pass predictive scheme.</p>
   </header>
   <main>
+    <section>
+      <h2>What changed and why</h2>
+      <p class="note" style="margin-top:0;">The <strong>legacy</strong> unwrap walks tone-by-tone and folds each difference into (−π, π]. That is <strong>naive to frequency gaps</strong> (it assumes the phase jump is only from range, not from missing bins) and <strong>propagates one bad tone</strong> into every later sample—so one multipath hit can tilt the whole phase-vs-frequency line used for slope ranging.</p>
+      <ul class="doc-list">
+        <li><strong>Robust method:</strong> estimate a global <strong>dφ/df</strong> from many pairwise wraps (median), then <strong>predict</strong> each sample’s branch using that slope and the actual Δf, adding integer multiples of 2π only where needed. A <strong>WLS refit</strong> weighted by tone quality updates the slope once, then the predictive step repeats.</li>
+        <li><strong>Use case win:</strong> in BLE CS, tones are not always contiguous or equally trustworthy; this keeps the unwrapped phase <strong>locally consistent with physics</strong> so the subsequent weighted regression / IRLS in <span class="pill">cs_phase_slope_estimate()</span> starts from a cleaner line—fewer bogus distance pulls for <strong>keyfob / cabin multipath</strong>.</li>
+        <li><strong>Safety:</strong> if geometry is degenerate, firmware <strong>falls back to the old sequential unwrap</strong> so you never get a hard failure from the new block alone. This page is synthetic; always validate on-air against your calibration and KPIs.</li>
+      </ul>
+      <div class="callout"><strong>Not a security boundary.</strong> Better unwrap reduces <strong>range bias</strong>; it does not stop relay or pairing attacks. Keep cryptographic and policy controls separate.</div>
+      <p class="note">Full pipeline context: <a href="cs-estimator-visualization.html" style="color:var(--accent);">cs-estimator-visualization.html</a></p>
+    </section>
     <section>
       <h2>Model</h2>
       <div id="math1"></div>

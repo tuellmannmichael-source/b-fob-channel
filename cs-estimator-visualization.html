@@ -84,6 +84,16 @@
     .katex-display { margin: 0.75rem 0 !important; }
     .note { color: var(--muted); font-size: 0.9rem; margin-top: 0.5rem; }
     .path-active { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+    .doc-list { margin: 0.5rem 0 0 1.1rem; padding: 0; color: var(--text); }
+    .doc-list li { margin: 0.35rem 0; }
+    .callout {
+      border-left: 3px solid var(--accent);
+      padding: 0.5rem 0 0.5rem 1rem;
+      margin: 0.75rem 0 0;
+      background: #0d1117;
+      border-radius: 0 8px 8px 0;
+      font-size: 0.92rem;
+    }
   </style>
 </head>
 <body>
@@ -92,6 +102,38 @@
     <p>Developer view: formulas (KaTeX), data flow (Mermaid), interactive demos (Plotly). Mirrors the logic in <span class="kbd">cs_estimator.c</span> and <span class="kbd">cs_decision.c</span> (reference tree).</p>
   </header>
   <main>
+    <section id="sec-improve">
+      <h2>What we improved, why it helps, and safety</h2>
+      <p class="note" style="margin-top:0;">This page documents the <strong>signal-processing and fusion stack</strong> for BLE Channel Sounding (CS) distance used before trilateration. The goal is more stable <strong>per-link range</strong> under multipath, missing tones, and uneven tone spacing—typical for a <strong>keyfob in a vehicle cabin</strong> where metal and glass create reflections and not every MHz bin is always usable.</p>
+
+      <h3>Improvements (vs. simpler baselines)</h3>
+      <ul class="doc-list">
+        <li><strong>IFFT path — phase-only CTF:</strong> each tone is projected onto the <strong>unit circle</strong> before the Hann window. That removes slow amplitude drift (antenna / analog gain vs. frequency) so the delay estimate follows <strong>phase vs. distance</strong>, not channel gain shape.</li>
+        <li><strong>Missing-channel interpolation:</strong> gaps in the nominal 1 MHz grid are filled with <strong>wrapped-phase interpolation</strong> before the spectral step. Fewer spectral holes → less sidelobe confusion for <strong>first-path</strong> picking when the controller drops tones (interference, policy).</li>
+        <li><strong>Adaptive measurement σ:</strong> reported uncertainty scales with <strong>how many good tones</strong> you have, the <strong>RF span</strong>, and <strong>average tone quality</strong>. Sparse or narrow-band sessions get a <strong>larger σ</strong>, so the Kalman gate does not over-trust a marginal measurement.</li>
+        <li><strong>RTT plausibility gate:</strong> if phase-based ranging (PBR) disagrees strongly with round-trip time, the stack can <strong>fall back to RTT</strong> (coarser but harder to “bend” with pure multipath on the phase screen).</li>
+        <li><strong>Optional RSSI blend:</strong> inverse-variance fusion with dominance rules adds a <strong>third anchor</strong> when RSSI distance is available—useful when CS is degraded but RSSI still carries coarse geometry.</li>
+        <li><strong>Robust phase unwrap (firmware):</strong> sequential unwrap is sensitive to a single bad tone and wrong Δf assumptions; production code uses a <strong>gap- and quality-aware predictive unwrap</strong> in <span class="kbd">cs_phase_unwrap.c</span>. Companion demo: <a href="cs-phase-unwrap-viz.html" style="color:var(--accent);">cs-phase-unwrap-viz.html</a>.</li>
+      </ul>
+
+      <h3>Why this is better for the use case</h3>
+      <ul class="doc-list">
+        <li><strong>Multipath:</strong> disagreement between phase-slope and IFFT triggers <strong>IFFT-first</strong> fusion; RTT/RSSI paths stop a single spurious PBR spike from dominating.</li>
+        <li><strong>Operational reality:</strong> tone quality and span vary every connection; <strong>adaptive σ</strong> and quality-aware unwrap avoid “optimistic” distance updates that would mis-rank antennas or corrupt trilateration weights.</li>
+        <li><strong>Policy layer:</strong> the CDF + hysteresis zone decision (Section 7) reduces <strong>flapping</strong> near the threshold—important for any <strong>near / far</strong> authorization rule.</li>
+      </ul>
+
+      <h3>Safety (engineering meaning)</h3>
+      <div class="callout">
+        <strong>Reliability, not cryptography.</strong> These changes improve <strong>measurement robustness</strong> and <strong>graceful degradation</strong>. They do <em>not</em> replace secure pairing, replay protection, or threat models against relay / physical-layer attacks. Product safety still requires <strong>end-to-end policy</strong> (timeouts, rate limits, secondary checks) outside this estimator.
+      </div>
+      <ul class="doc-list">
+        <li><strong>Defense in depth:</strong> innovation gate on the Kalman state, optional RTT override, and RSSI dominance rules limit how far a single bad procedure can move the filtered distance.</li>
+        <li><strong>Fail-soft path (product firmware):</strong> when CS stays unhealthy, receivers can fall back to <strong>RSSI-only</strong> ranging (see project Kconfig / degrade counters)—this visualization only explains the math when CS data <em>is</em> present.</li>
+        <li><strong>Validation mindset:</strong> treat P90/P95 range error, dropout, and reconnect KPIs under lab → parking → urban profiles; tune offsets and gates on <strong>your</strong> hardware, not only on these synthetic panels.</li>
+      </ul>
+    </section>
+
     <!-- Section 0 -->
     <section id="sec0">
       <h2>0. Pipeline overview</h2>
