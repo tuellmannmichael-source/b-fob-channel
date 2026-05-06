@@ -1,0 +1,92 @@
+#ifndef APP_CONFIG_H
+#define APP_CONFIG_H
+
+#include <stdint.h>
+
+/* Standalone test fallback defaults for Kconfig symbols. */
+#ifndef CONFIG_BLE_CS_ENABLE
+#define CONFIG_BLE_CS_ENABLE 0
+#endif
+
+#ifndef CONFIG_CS_PHASE_SLOPE_OFFSET_MM
+#define CONFIG_CS_PHASE_SLOPE_OFFSET_MM 1910
+#endif
+
+#ifndef CONFIG_CS_IFFT_OFFSET_MM
+#define CONFIG_CS_IFFT_OFFSET_MM 460
+#endif
+
+#ifndef CONFIG_CS_OUTLIER_GATE_SIGMA_X10
+#define CONFIG_CS_OUTLIER_GATE_SIGMA_X10 30
+#endif
+
+#ifndef CONFIG_CS_FUSION_AGREE_MM
+#define CONFIG_CS_FUSION_AGREE_MM 300
+#endif
+
+#ifndef CONFIG_TRIANGULATION_RSSI_FALLBACK_SIGMA_CM
+#define CONFIG_TRIANGULATION_RSSI_FALLBACK_SIGMA_CM 400
+#endif
+
+#ifndef CONFIG_BLE_CS_DEGRADE_ERR_THRESHOLD
+#define CONFIG_BLE_CS_DEGRADE_ERR_THRESHOLD 5
+#endif
+
+/* Keyfob identity -- set to the BLE address of your keyfob after bonding */
+#define KEYFOB_NAME "KEYFOB"
+
+/* Number of receiver antennas */
+#define NUM_ANTENNAS CONFIG_TRIANGULATION_NUM_ANTENNAS
+
+/* RSSI path-loss model parameters (can be overridden per-antenna) */
+#define RSSI_REF_DBM    CONFIG_TRIANGULATION_RSSI_REF
+#define PATH_LOSS_EXP   (CONFIG_TRIANGULATION_PATH_LOSS_EXP_X10 / 10.0f)
+
+/* Kalman filter parameters */
+#define KALMAN_Q        (CONFIG_TRIANGULATION_KALMAN_Q_X10 / 10.0f)
+#define KALMAN_R        (CONFIG_TRIANGULATION_KALMAN_R_X10 / 10.0f)
+
+/* RSSI fallback uncertainty for weighted solver */
+#define RSSI_FALLBACK_SIGMA_M (CONFIG_TRIANGULATION_RSSI_FALLBACK_SIGMA_CM / 100.0f)
+
+/* BLE ranging mode */
+#define BLE_CS_ENABLE (CONFIG_BLE_CS_ENABLE == 1)
+
+/* BLE connection parameters */
+#define CONN_INTERVAL_MS       CONFIG_BLE_CONN_INTERVAL_MS
+#define SUPERVISION_TIMEOUT_MS CONFIG_BLE_SUPERVISION_TIMEOUT_MS
+#define RECONNECT_INITIAL_MS   CONFIG_BLE_RECONNECT_INITIAL_MS
+#define RECONNECT_MAX_MS       CONFIG_BLE_RECONNECT_MAX_MS
+
+/* Connection sampling mode */
+#define CS_MODE_ROTATING       CONFIG_BLE_CS_MODE_ROTATING
+#define CS_SWITCH_SETTLE_US    CONFIG_BLE_CS_SWITCH_SETTLE_US
+#define CS_SESSION_TIMING_US   CONFIG_BLE_CS_SESSION_TIMING_US
+#define CS_WATCHDOG_MAX_FAILURES CONFIG_BLE_CS_WATCHDOG_MAX_FAILURES
+#define CS_WATCHDOG_COOLDOWN_CYCLES CONFIG_BLE_CS_WATCHDOG_COOLDOWN_CYCLES
+
+/* BLE Channel Sounding rollout + degradation handling */
+#define BLE_CS_DEGRADE_ERR_THRESHOLD CONFIG_BLE_CS_DEGRADE_ERR_THRESHOLD
+
+/* CS procedure scheduling */
+#ifndef CONFIG_BLE_CS_PROCEDURE_INTERVAL_MS
+#define CONFIG_BLE_CS_PROCEDURE_INTERVAL_MS 500
+#endif
+#define CS_PROCEDURE_INTERVAL_MS CONFIG_BLE_CS_PROCEDURE_INTERVAL_MS
+
+/* CS distance median pre-filter window */
+#ifndef CONFIG_BLE_CS_MEDIAN_WINDOW
+#define CONFIG_BLE_CS_MEDIAN_WINDOW 5
+#endif
+#define CS_MEDIAN_WINDOW CONFIG_BLE_CS_MEDIAN_WINDOW
+
+/* RTT plausibility gate tolerance */
+#ifndef CONFIG_BLE_CS_RTT_GATE_TOLERANCE_MM
+#define CONFIG_BLE_CS_RTT_GATE_TOLERANCE_MM 2000
+#endif
+#define CS_RTT_GATE_TOLERANCE_M (CONFIG_BLE_CS_RTT_GATE_TOLERANCE_MM / 1000.0f)
+
+/* Position update rate */
+#define POSITION_UPDATE_INTERVAL_MS 200 /* 5 Hz */
+
+#endif /* APP_CONFIG_H */

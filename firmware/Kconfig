@@ -1,0 +1,196 @@
+menu "BLE Triangulation"
+
+config TRIANGULATION_NUM_ANTENNAS
+    int "Number of receiver antennas"
+    default 3
+    range 3 8
+    help
+      Number of BLE receiver nodes used for trilateration.
+
+config TRIANGULATION_RSSI_REF
+    int "Reference RSSI at 1 meter (dBm, negative)"
+    default -59
+    range -100 -20
+    help
+      Measured RSSI at 1 meter from the keyfob. Calibrate per-antenna
+      for best results.
+
+config TRIANGULATION_PATH_LOSS_EXP_X10
+    int "Path-loss exponent * 10 (e.g. 30 = 3.0)"
+    default 30
+    range 15 60
+    help
+      Path-loss exponent for the log-distance model, multiplied by 10
+      to avoid floating point in Kconfig. A vehicle interior typically
+      uses 2.5-3.5 (i.e. 25-35 here).
+
+config TRIANGULATION_KALMAN_Q_X10
+    int "Kalman process noise Q * 10"
+    default 5
+    help
+      Process noise for the RSSI Kalman filter. Higher = more responsive.
+      Value is divided by 10 at runtime (5 = 0.5).
+
+config TRIANGULATION_KALMAN_R_X10
+    int "Kalman measurement noise R * 10"
+    default 80
+    help
+      Measurement noise for the RSSI Kalman filter. Higher = smoother.
+      Value is divided by 10 at runtime (80 = 8.0).
+
+
+config TRIANGULATION_RSSI_FALLBACK_SIGMA_CM
+    int "RSSI fallback sigma (cm)"
+    default 400
+    range 20 2000
+    help
+      Uncertainty used by weighted trilateration when distance comes from
+      RSSI fallback rather than channel sounding.
+
+config BLE_CS_ENABLE
+    bool "Enable BLE Channel Sounding integration path"
+    default n
+    help
+      Enables the channel-sounding-ready data path. Current implementation
+      keeps RSSI fallback active until controller-specific CS hooks are wired.
+
+config CS_PHASE_SLOPE_OFFSET_MM
+    int "Phase slope calibration offset (mm)"
+    default 1910
+    depends on BLE_CS_ENABLE
+    help
+      Systematic distance offset of the phase-slope estimator, measured at a
+      known reference distance. Subtracted from every estimate. Literature
+      reports ~1.91 m typical for BLE CS; measure on your hardware to refine.
+
+config CS_IFFT_OFFSET_MM
+    int "IFFT calibration offset (mm)"
+    default 460
+    depends on BLE_CS_ENABLE
+    help
+      Systematic distance offset of the IFFT estimator, measured at a known
+      reference distance. Subtracted from every estimate. Literature reports
+      ~0.46 m typical; measure on your hardware to refine.
+
+config CS_OUTLIER_GATE_SIGMA_X10
+    int "Outlier gate width in sigmas * 10 (e.g. 30 = 3.0)"
+    default 30
+    depends on BLE_CS_ENABLE
+    help
+      Innovation gate width for the distance Kalman filter. Measurements
+      deviating more than this many sigmas from the predicted state are
+      flagged as outliers and given elevated uncertainty.
+
+config CS_FUSION_AGREE_MM
+    int "Phase-slope / IFFT fusion agreement threshold (mm)"
+    default 300
+    depends on BLE_CS_ENABLE
+    help
+      When both estimators agree within this distance, their results are
+      averaged with reduced uncertainty. Otherwise only the IFFT result
+      (more multipath-robust) is used.
+
+config BLE_RECONNECT_INITIAL_MS
+    int "Initial reconnect delay (ms)"
+    default 100
+    help
+      Delay before the first reconnect attempt after a disconnect.
+
+config BLE_RECONNECT_MAX_MS
+    int "Maximum reconnect delay (ms)"
+    default 3000
+    help
+      Upper bound for exponential-backoff reconnect delay.
+
+config BLE_CONN_INTERVAL_MS
+    int "BLE connection interval (ms)"
+    default 100
+    range 8 4000
+    help
+      BLE connection interval in milliseconds. Lower values give faster
+      RSSI sampling but increase power consumption.
+
+choice BLE_CS_MEASUREMENT_MODE
+    prompt "Connection sampling mode"
+    default BLE_CS_MODE_ROTATING
+    help
+      Select if connection samples are taken with a rotating RF switch
+      (A->B->C) or with a fixed single antenna.
+
+config BLE_CS_MODE_ROTATING
+    bool "Rotating RF switch (A->B->C)"
+
+config BLE_CS_MODE_SINGLE
+    bool "Single-antenna connection sampling"
+
+endchoice
+
+config BLE_CS_SWITCH_SETTLE_US
+    int "RF switch settle budget before sample (us)"
+    default 150
+    range 10 2000
+
+config BLE_CS_SESSION_TIMING_US
+    int "Connection-event session overhead (us)"
+    default 400
+    range 0 4000
+
+config BLE_CS_WATCHDOG_MAX_FAILURES
+    int "Per-antenna watchdog threshold (consecutive read failures)"
+    default 3
+    range 1 20
+
+config BLE_CS_WATCHDOG_COOLDOWN_CYCLES
+    int "Per-antenna cooldown cycles after watchdog trip"
+    default 6
+    range 1 100
+
+config BLE_SUPERVISION_TIMEOUT_MS
+    int "BLE supervision timeout (ms)"
+    default 4000
+    range 100 32000
+    help
+      Time without successful connection events before the link is
+      considered lost.
+
+config BLE_CS_DEGRADE_ERR_THRESHOLD
+    int "CS degrade threshold before RSSI fallback"
+    default 5
+    range 1 100
+    help
+      Number of consecutive CS failures before the receiver marks CS as
+      degraded and falls back to RSSI-only measurements.
+
+config BLE_CS_PROCEDURE_INTERVAL_MS
+    int "CS procedure request interval (ms)"
+    default 500
+    range 100 10000
+    depends on BLE_CS_ENABLE
+    help
+      Interval between Channel Sounding procedure requests. Shorter
+      intervals give faster distance updates but consume more airtime.
+      Must be larger than the connection interval to avoid scheduling
+      collisions.
+
+config BLE_CS_MEDIAN_WINDOW
+    int "CS distance median pre-filter window size"
+    default 5
+    range 3 15
+    depends on BLE_CS_ENABLE
+    help
+      Number of recent CS distance estimates to keep for the running
+      median pre-filter before Kalman update. Larger windows smooth
+      more but add latency.
+
+config BLE_CS_RTT_GATE_TOLERANCE_MM
+    int "RTT plausibility gate tolerance (mm)"
+    default 2000
+    depends on BLE_CS_ENABLE
+    help
+      Maximum acceptable difference between PBR distance and RTT distance.
+      If the difference exceeds this value, the PBR estimate is discarded
+      and RTT is used as fallback.
+
+endmenu
+
+source "Kconfig.zephyr"

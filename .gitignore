@@ -1,0 +1,17 @@
+# Snapshots (keep sources in-tree, not archives)
+*.zip
+
+# Build artifacts
+tests/test_rssi_filter
+tests/test_triangulation
+*.o
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+*.png
+
+# nRF build
+build/
+
