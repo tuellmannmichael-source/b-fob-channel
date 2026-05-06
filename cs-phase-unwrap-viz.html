@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BLE CS — Phase unwrap (naive vs robust)</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous" />
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
+    body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); line-height:1.5; }
+    header { padding:1.5rem; border-bottom:1px solid var(--border); }
+    main { max-width:1100px; margin:0 auto; padding:1rem 1.25rem 2rem; }
+    section { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:1.25rem; margin-bottom:1.25rem; }
+    h1 { margin:0 0 .5rem; font-size:1.35rem; }
+    h2 { margin:0 0 .75rem; color:var(--accent); font-size:1.1rem; }
+    label { display:block; margin:.35rem 0 .1rem; color:var(--muted); font-size:.85rem; }
+    input[type="range"] { width:100%; max-width:520px; }
+    .plot { width:100%; height:340px; margin-top:.75rem; }
+    .note { color:var(--muted); font-size:.88rem; margin-top:.5rem; }
+    .pill { font-family:ui-monospace,monospace; background:#21262d; padding:.15rem .45rem; border-radius:6px; font-size:.78rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Phase unwrap — naive vs robust (predictive + WLS refit)</h1>
+    <p class="note">Mirrors <span class="pill">cs_phase_unwrap.c</span> logic in JavaScript for exploration. Firmware uses the same two-pass predictive scheme.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Model</h2>
+      <div id="math1"></div>
+    </section>
+    <section>
+      <h2>Controls</h2>
+      <label>Number of tones n</label>
+      <input type="range" id="nT" min="12" max="48" step="1" value="24" />
+      <label>True slope (rad / Hz) — drives wrapped phase vs f</label>
+      <input type="range" id="slope" min="-8e-9" max="8e-9" step="1e-10" value="2.2e-9" />
+      <label>Gaussian noise on phase (rad, σ)</label>
+      <input type="range" id="noise" min="0" max="0.6" step="0.02" value="0.08" />
+      <label>Gap: skip every k-th tone (1 = no gap)</label>
+      <input type="range" id="gapK" min="1" max="8" step="1" value="1" />
+      <label>Outlier bin index (0 = none)</label>
+      <input type="range" id="outI" min="0" max="47" step="1" value="0" />
+      <label>Outlier amplitude added to phase (rad)</label>
+      <input type="range" id="outA" min="0" max="2.5" step="0.05" value="0" />
+    </section>
+    <section>
+      <h2>Phase vs frequency</h2>
+      <div id="plotPh" class="plot"></div>
+      <p class="note">Orange: wrapped principal phase. Blue: naive sequential unwrap. Green: robust predictive unwrap.</p>
+    </section>
+    <section>
+      <h2>Residuals vs linear fit (phase rad)</h2>
+      <div id="plotRes" class="plot"></div>
+      <p class="note">After WLS line φ ≈ a·f + b on each unwrapped series; large naive residuals after gaps/outliers indicate slope bias.</p>
+    </section>
+  </main>
+  <script>
+    const M_PI = Math.PI;
+    const C = 299792458;
+    const f0 = 2.402e9;
+    const df = 1e6;
+
+    function wrapPi(d) {
+      while (d > M_PI) d -= 2 * M_PI;
+      while (d < -M_PI) d += 2 * M_PI;
+      return d;
+    }
+
+    function medianSort(arr, n) {
+      const a = arr.slice(0, n).sort((u, v) => u - v);
+      const m = a.length;
+      return m % 2 ? a[(m - 1) / 2] : 0.5 * (a[m / 2 - 1] + a[m / 2]);
+    }
+
+    function naiveUnwrap(ph, n) {
+      const u = ph.slice();
+      for (let i = 1; i < n; i++) {
+        let d = u[i] - u[i - 1];
+        d = wrapPi(d);
+        u[i] = u[i - 1] + d;
+      }
+      return u;
+    }
+
+    function coarseSlopeOrigin(t, n) {
+      const slopes = [];
+      for (let i = 1; i < n; i++) {
+        const dff = t[i].f - t[0].f;
+        if (Math.abs(dff) < 1e3) continue;
+        let d = t[i].ph - t[0].ph;
+        d = wrapPi(d);
+        slopes.push(d / dff);
+      }
+      return slopes.length ? medianSort(slopes, slopes.length) : 0;
+    }
+
+    function wlsSlope(x, y, w, n) {
+      let sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+      for (let i = 0; i < n; i++) {
+        sw += w[i]; swx += w[i] * x[i]; swy += w[i] * y[i];
+        swxx += w[i] * x[i] * x[i]; swxy += w[i] * x[i] * y[i];
+      }
+      const det = sw * swxx - swx * swx;
+      if (Math.abs(det) < 1e-24) return 0;
+      return (sw * swxy - swx * swy) / det;
+    }
+
+    function predictive(t, n, slope, out) {
+      out[0] = t[0].ph;
+      for (let i = 1; i < n; i++) {
+        const dff = t[i].f - t[i - 1].f;
+        const pred = out[i - 1] + slope * dff;
+        const k = Math.round((t[i].ph - pred) / (2 * M_PI));
+        out[i] = t[i].ph - k * 2 * M_PI;
+      }
+    }
+
+    function robustUnwrap(t, n) {
+      let slope = coarseSlopeOrigin(t, n);
+      if (Math.abs(slope) < 1e-18) {
+        const sl = [];
+        for (let i = 1; i < n; i++) {
+          const dff = t[i].f - t[i - 1].f;
+          if (Math.abs(dff) < 1) continue;
+          let d = t[i].ph - t[i - 1].ph;
+          d = wrapPi(d);
+          sl.push(d / dff);
+        }
+        slope = sl.length ? medianSort(sl, sl.length) : 0;
+      }
+      const uw = new Array(n);
+      const w = new Array(n);
+      const x = new Array(n);
+      predictive(t, n, slope, uw);
+      for (let i = 0; i < n; i++) {
+        w[i] = Math.max(t[i].q / 3, 1e-6);
+        x[i] = t[i].f;
+      }
+      slope = wlsSlope(x, uw, w, n);
+      predictive(t, n, slope, uw);
+      return uw;
+    }
+
+    function residuals(x, y, n) {
+      let sx = 0, sy = 0;
+      for (let i = 0; i < n; i++) { sx += x[i]; sy += y[i]; }
+      sx /= n; sy /= n;
+      let sxx = 0, sxy = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - sx;
+        sxx += dx * dx;
+        sxy += dx * (y[i] - sy);
+      }
+      const a = sxx > 1e-30 ? sxy / sxx : 0;
+      const b = sy - a * sx;
+      const r = new Array(n);
+      for (let i = 0; i < n; i++) r[i] = y[i] - (a * x[i] + b);
+      return r;
+    }
+
+    function buildTones() {
+      const nAll = +document.getElementById("nT").value | 0;
+      const slope = +document.getElementById("slope").value;
+      const sig = +document.getElementById("noise").value;
+      const gapK = +document.getElementById("gapK").value | 0;
+      const outI = +document.getElementById("outI").value | 0;
+      const outA = +document.getElementById("outA").value;
+      const arr = [];
+      for (let k = 0; k < nAll; k++) {
+        if (gapK > 1 && k % gapK === gapK - 1) continue;
+        const f = f0 + arr.length * df;
+        let ph = slope * (f - f0) + (Math.random() * 2 - 1) * sig * 0.5;
+        ph = wrapPi(ph);
+        const q = 2 + (Math.random() > 0.85 ? 1 : 0);
+        arr.push({ f, ph, q, kBin: arr.length });
+      }
+      const n = arr.length;
+      if (outI > 0 && outI < n) arr[outI].ph = wrapPi(arr[outI].ph + outA);
+      return arr;
+    }
+
+    function go() {
+      const tones = buildTones();
+      const n = tones.length;
+      const f = tones.map((t) => t.f);
+      const wrapped = tones.map((t) => t.ph);
+      const naive = naiveUnwrap(wrapped, n);
+      const robust = robustUnwrap(tones, n);
+      const resN = residuals(f, naive, n);
+      const resR = residuals(f, robust, n);
+
+      Plotly.react("plotPh", [
+        { x: f, y: wrapped, mode: "markers", name: "Wrapped", marker: { size: 7, color: "#d29922" } },
+        { x: f, y: naive, mode: "lines+markers", name: "Naive unwrap", line: { color: "#58a6ff" }, marker: { size: 5 } },
+        { x: f, y: robust, mode: "lines+markers", name: "Robust unwrap", line: { color: "#3fb950" }, marker: { size: 5 } },
+      ], {
+        paper_bgcolor: "#0d1117", plot_bgcolor: "#161b22", font: { color: "#e6edf3" },
+        margin: { t: 36, r: 20, b: 48, l: 56 },
+        title: "Unwrapped phase vs frequency (n = " + n + ")",
+        xaxis: { title: "f (Hz)" }, yaxis: { title: "φ (rad)" },
+        showlegend: true, legend: { orientation: "h" },
+      });
+
+      Plotly.react("plotRes", [
+        { x: f, y: resN, mode: "lines+markers", name: "Naive residual", line: { color: "#58a6ff" } },
+        { x: f, y: resR, mode: "lines+markers", name: "Robust residual", line: { color: "#3fb950" } },
+      ], {
+        paper_bgcolor: "#0d1117", plot_bgcolor: "#161b22", font: { color: "#e6edf3" },
+        margin: { t: 36, r: 20, b: 48, l: 56 },
+        title: "Residual φ − (a·f + b) after OLS fit on each curve",
+        xaxis: { title: "f (Hz)" }, yaxis: { title: "Δφ (rad)" },
+        showlegend: true, legend: { orientation: "h" },
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      katex.render(String.raw`\text{Robust: } \hat s=\mathrm{med}_i\frac{\mathrm{wrap}(\phi_i-\phi_0)}{f_i-f_0},\quad
+\phi_i^{\mathrm{uw}}=\phi_i-2\pi\cdot\mathrm{round}\!\Big(\frac{\phi_i-\phi_{i-1}^{\mathrm{uw}}-\hat s(f_i-f_{i-1})}{2\pi}\Big),\text{ then WLS refit }\hat s.`, document.getElementById("math1"), { displayMode: true, throwOnError: false });
+      ["nT", "slope", "noise", "gapK", "outI", "outA"].forEach((id) => {
+        document.getElementById(id).addEventListener("input", go);
+      });
+      go();
+    });
+  </script>
+</body>
+</html>
