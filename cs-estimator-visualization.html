@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BLE CS Estimator — Math &amp; Pipeline (Developer)</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous" />
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --accent2: #3fb950;
+      --warn: #d29922;
+      --danger: #f85149;
+      --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+      --sans: "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    header {
+      padding: 2rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #111827 0%, var(--bg) 100%);
+    }
+    header h1 { margin: 0 0 0.5rem; font-size: 1.65rem; }
+    header p { margin: 0; color: var(--muted); max-width: 72ch; }
+    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    section {
+      margin-bottom: 2.5rem;
+      padding: 1.5rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    section h2 {
+      margin: 0 0 1rem;
+      font-size: 1.25rem;
+      color: var(--accent);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+    }
+    h3 { font-size: 1rem; color: var(--muted); margin: 1.25rem 0 0.5rem; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+    pre.code {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      font-family: var(--mono);
+      color: #c9d1d9;
+    }
+    .mermaid { background: #0d1117; border-radius: 8px; padding: 1rem; }
+    .plot { width: 100%; height: 360px; margin: 0.75rem 0; }
+    .plot-sm { height: 280px; }
+    label { display: block; margin: 0.35rem 0 0.15rem; color: var(--muted); font-size: 0.85rem; }
+    input[type="range"] { width: 100%; }
+    .row { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+    .pill {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-family: var(--mono);
+      background: #21262d;
+      border: 1px solid var(--border);
+    }
+    .out { font-family: var(--mono); color: var(--accent2); }
+    .kbd { font-family: var(--mono); background: #21262d; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .katex-display { margin: 0.75rem 0 !important; }
+    .note { color: var(--muted); font-size: 0.9rem; margin-top: 0.5rem; }
+    .path-active { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BLE Channel Sounding — Estimator Math &amp; Pipeline</h1>
+    <p>Developer view: formulas (KaTeX), data flow (Mermaid), interactive demos (Plotly). Mirrors the logic in <span class="kbd">cs_estimator.c</span> and <span class="kbd">cs_decision.c</span> (reference tree).</p>
+  </header>
+  <main>
+    <!-- Section 0 -->
+    <section id="sec0">
+      <h2>0. Pipeline overview</h2>
+      <div class="mermaid">
+flowchart LR
+  Tones[Raw Tones] --> QFilter[Quality Filter]
+  QFilter --> PhaseSlope[Phase Slope]
+  QFilter --> Interp[Missing-Ch Interp]
+  Interp --> IFFT[IFFT First-Path]
+  PhaseSlope --> Fusion[PBR Fusion]
+  IFFT --> Fusion
+  Fusion --> RTTGate[RTT Gate]
+  RTTGate --> RSSIBlend[RSSI Blend]
+  RSSIBlend --> OutlierGate[Outlier Gate]
+  OutlierGate --> Kalman[Kalman Update]
+  Kalman --> Decision[CDF Decision]
+  Decision --> Zone[NEAR / FAR]
+      </div>
+      <p class="note">Diagram renders after <span class="kbd">DOMContentLoaded</span> via <span class="kbd">mermaid.run()</span>.</p>
+    </section>
+
+    <!-- Section 1 -->
+    <section id="sec1">
+      <h2>1. Quality filter &amp; metrics</h2>
+      <div id="math-sec1"></div>
+      <pre class="code">// cs_estimator.h
+#define CS_TONE_QUALITY_MIN 2
+#define CS_MIN_GOOD_TONES   8</pre>
+      <p class="note">Also: <span class="kbd">freq_span_hz</span> = max(f) − min(f), <span class="kbd">avg_quality</span> = mean quality over all good tones (for adaptive σ).</p>
+    </section>
+
+    <!-- Section 2 -->
+    <section id="sec2">
+      <h2>2. Phase-slope estimator</h2>
+      <div id="math-sec2"></div>
+      <pre class="code">// Distance from slope (round-trip phase)
+d_raw = |slope| * c / (4*pi)
+d     = max(d_raw - offset_m, 0.05f)</pre>
+      <h3>Demo: synthetic phases + WLS + MAD / IRLS</h3>
+      <div class="row">
+        <div style="flex:1; min-width:220px;">
+          <label>Multipath noise (rad)</label>
+          <input type="range" id="ps_noise" min="0" max="0.8" step="0.02" value="0.15" />
+        </div>
+        <div style="flex:1; min-width:220px;">
+          <label>Outlier amplitude (rad)</label>
+          <input type="range" id="ps_out" min="0" max="2.5" step="0.05" value="0.8" />
+        </div>
+      </div>
+      <div id="plot_phase" class="plot"></div>
+      <p class="note">Gray: unwrapped phase; blue line: weighted regression; dotted: MAD×1.5 threshold for IRLS weights.</p>
+    </section>
+
+    <!-- Section 3 -->
+    <section id="sec3">
+      <h2>3. IFFT / First-Path</h2>
+      <div id="math-sec3"></div>
+      <h3>Demo: CTF on unit circle, Hann window, IDFT magnitude, gap fill</h3>
+      <label><input type="checkbox" id="ifft_interp" checked /> Fill 1 MHz gaps with phase interpolation (same idea as <span class="kbd">interpolate_missing_tones</span>)</label>
+      <p class="note" id="ifft_gap_v" style="margin-top:0.35rem;"></p>
+      <div class="row" style="margin-top:0.75rem;">
+        <div style="flex:1; min-width:200px;">
+          <label>Gap index k (drop tone k, valid 1 … n−2)</label>
+          <input type="range" id="ifft_gap" min="1" max="30" step="1" value="6" />
+        </div>
+        <div style="flex:1; min-width:200px;">
+          <label>Number of tones n</label>
+          <input type="range" id="ifft_n" min="12" max="32" step="1" value="20" />
+        </div>
+      </div>
+      <div id="plot_iq" class="plot plot-sm"></div>
+      <div id="plot_ifft" class="plot"></div>
+    </section>
+
+    <!-- Section 4 -->
+    <section id="sec4">
+      <h2>4. Adaptive measurement σ</h2>
+      <div id="math-sec4"></div>
+      <div class="grid2">
+        <div>
+          <label>n_good</label>
+          <input type="range" id="sig_n" min="8" max="72" step="1" value="24" />
+          <div><span class="pill">n_good = <span id="sig_n_v" class="out"></span></span></div>
+          <label>freq_span (MHz)</label>
+          <input type="range" id="sig_span" min="10" max="72" step="1" value="40" />
+          <div><span class="pill">span = <span id="sig_span_v" class="out"></span> MHz</span></div>
+          <label>avg_quality (0–3)</label>
+          <input type="range" id="sig_q" min="1" max="3" step="0.05" value="2.4" />
+          <div><span class="pill">avg_q = <span id="sig_q_v" class="out"></span></span></div>
+        </div>
+        <div>
+          <label>Base σ (fused / single)</label>
+          <select id="sig_base">
+            <option value="0.07">SIGMA_FUSED_BASE = 0.07 m</option>
+            <option value="0.10">SIGMA_SINGLE_BASE = 0.10 m</option>
+          </select>
+          <div style="margin-top:1rem;">
+            <span class="pill">σ_adaptive = <span id="sig_out" class="out"></span> m</span>
+          </div>
+          <div id="plot_sigma" class="plot plot-sm" style="margin-top:0.5rem;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 5 -->
+    <section id="sec5">
+      <h2>5. Fusion, RTT gate, RSSI blend</h2>
+      <div id="math-sec5"></div>
+      <h3>Demo: inputs → path &amp; output</h3>
+      <div class="grid2">
+        <div>
+          <label>d_phase (m)</label>
+          <input type="range" id="f_dph" min="0.5" max="8" step="0.05" value="2.1" />
+          <span class="out" id="f_dph_v"></span>
+          <label>d_ifft (m)</label>
+          <input type="range" id="f_dif" min="0.5" max="8" step="0.05" value="2.35" />
+          <span class="out" id="f_dif_v"></span>
+          <label>fusion_agree_m</label>
+          <input type="range" id="f_agree" min="0.05" max="1.5" step="0.05" value="0.3" />
+          <span class="out" id="f_agree_v"></span>
+        </div>
+        <div>
+          <label><input type="checkbox" id="f_rtt_en" /> RTT valid</label>
+          <label>d_rtt (m)</label>
+          <input type="range" id="f_drt" min="0.5" max="8" step="0.05" value="5.0" />
+          <label>rtt_gate_tolerance_m</label>
+          <input type="range" id="f_tol" min="0.2" max="4" step="0.1" value="2.0" />
+        </div>
+        <div>
+          <label><input type="checkbox" id="f_rs_en" checked /> RSSI valid</label>
+          <label>d_rssi (m)</label>
+          <input type="range" id="f_drs" min="0.5" max="8" step="0.05" value="2.2" />
+          <label>σ_rssi (m)</label>
+          <input type="range" id="f_srs" min="0.2" max="3" step="0.05" value="1.2" />
+        </div>
+        <div>
+          <p><strong>After fusion (before RTT/RSSI):</strong> <span id="f_pre" class="out"></span></p>
+          <p><strong>After RTT gate:</strong> <span id="f_rtt" class="out"></span></p>
+          <p><strong>After RSSI blend:</strong> <span id="f_fin" class="out"></span></p>
+          <p><strong>σ (simplified):</strong> <span id="f_sig" class="out"></span></p>
+          <div id="f_paths" class="note"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 6 -->
+    <section id="sec6">
+      <h2>6. Kalman distance state + innovation gate</h2>
+      <div id="math-sec6"></div>
+      <div class="row" style="margin:0.75rem 0;">
+        <button type="button" id="kal_step" style="padding:0.4rem 0.9rem; cursor:pointer;">Step</button>
+        <button type="button" id="kal_reset" style="padding:0.4rem 0.9rem; cursor:pointer;">Reset</button>
+        <label style="margin:0;"><input type="checkbox" id="kal_auto" /> Auto (50 ms)</label>
+      </div>
+      <div id="plot_kal" class="plot"></div>
+    </section>
+
+    <!-- Section 7 -->
+    <section id="sec7">
+      <h2>7. Zone decision (Gaussian CDF + hysteresis)</h2>
+      <div id="math-sec7"></div>
+      <div class="grid2">
+        <div>
+          <label>x_mean μ (m)</label>
+          <input type="range" id="d_mu" min="0.5" max="6" step="0.02" value="2.4" />
+          <label>Variance p_var σ² (m²)</label>
+          <input type="range" id="d_pv" min="0.01" max="2" step="0.01" value="0.25" />
+          <label>Threshold θ₀ (m)</label>
+          <input type="range" id="d_th" min="1" max="4" step="0.02" value="2.5" />
+          <label>Hysteresis h (m)</label>
+          <input type="range" id="d_hy" min="0" max="0.8" step="0.02" value="0.15" />
+          <label>confidence_min</label>
+          <input type="range" id="d_cm" min="0.5" max="0.98" step="0.01" value="0.8" />
+          <label>min_consecutive</label>
+          <input type="range" id="d_mc" min="1" max="6" step="1" value="2" />
+        </div>
+        <div>
+          <p><span class="pill">Effective threshold θ = <span id="d_eff" class="out"></span> m</span></p>
+          <p><span class="pill">P(d &lt; θ) = <span id="d_pn" class="out"></span></span> &nbsp; <span class="pill">Zone = <span id="d_zone" class="out"></span></span></p>
+          <p class="note" id="d_state"></p>
+        </div>
+      </div>
+      <div id="plot_cdf" class="plot"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js" crossorigin="anonymous"></script>
+  <script>
+    const C = 299792458;
+    const M_PI = Math.PI;
+    const TONE_SPACING = 1e6;
+    const IFFT_PAD = 8;
+    const FIRST_PATH_THR = 4;
+
+    function renderMath(id, tex) {
+      const el = document.getElementById(id);
+      if (!window.katex) return;
+      el.innerHTML = "";
+      const p = document.createElement("div");
+      katex.render(tex, p, { displayMode: true, throwOnError: false });
+      el.appendChild(p);
+    }
+
+    function unwrap(ph) {
+      const out = ph.slice();
+      for (let i = 1; i < out.length; i++) {
+        let d = out[i] - out[i - 1];
+        while (d > M_PI) d -= 2 * M_PI;
+        while (d < -M_PI) d += 2 * M_PI;
+        out[i] = out[i - 1] + d;
+      }
+      return out;
+    }
+
+    function wlsSlope(x, y, w) {
+      let sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+      for (let i = 0; i < x.length; i++) {
+        sw += w[i]; swx += w[i] * x[i]; swy += w[i] * y[i];
+        swxx += w[i] * x[i] * x[i]; swxy += w[i] * x[i] * y[i];
+      }
+      const det = sw * swxx - swx * swx;
+      if (Math.abs(det) < 1e-20) return { slope: 0, icept: 0 };
+      const slope = (sw * swxy - swx * swy) / det;
+      const icept = (swy - slope * swx) / sw;
+      return { slope, icept };
+    }
+
+    function median(arr) {
+      const a = arr.slice().sort((u, v) => u - v);
+      const n = a.length;
+      return n % 2 ? a[(n - 1) / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
+    }
+
+    function updatePhasePlot() {
+      const n = 18;
+      const f0 = 2.4e9;
+      const freqs = Array.from({ length: n }, (_, i) => f0 + i * TONE_SPACING);
+      const trueSlope = 1.2e-11;
+      const noise = +document.getElementById("ps_noise").value;
+      const outAmp = +document.getElementById("ps_out").value;
+      const phases = freqs.map((f, i) => {
+        let p = trueSlope * (f - freqs[0]) + (Math.random() - 0.5) * 2 * noise;
+        if (i === Math.floor(n / 2)) p += outAmp;
+        return p;
+      });
+      const up = unwrap(phases);
+      let w = freqs.map(() => 1);
+      let { slope, icept } = wlsSlope(freqs, up, w);
+      let pred = freqs.map((ff) => slope * ff + icept);
+      let res = up.map((yy, i) => Math.abs(yy - pred[i]));
+      let mad = median(res);
+      mad = Math.max(mad, 1e-6);
+      w = res.map((r) => (r > 1.5 * mad ? 0.1 : 1));
+      ({ slope, icept } = wlsSlope(freqs, up, w));
+      pred = freqs.map((ff) => slope * ff + icept);
+      res = up.map((yy, i) => Math.abs(yy - pred[i]));
+      mad = Math.max(median(res), 1e-6);
+
+      const dist = Math.max(Math.abs(slope) * C / (4 * M_PI) - 0, 0.05);
+
+      const traces = [
+        { x: freqs, y: up, mode: "markers", name: "φ unwrap", marker: { size: 7, color: "#8b949e" } },
+        { x: freqs, y: pred, mode: "lines", name: "WLS + IRLS", line: { color: "#58a6ff", width: 2 } },
+        {
+          x: freqs,
+          y: pred.map((p, i) => p + 1.5 * mad),
+          mode: "lines",
+          name: "MAD × 1.5",
+          line: { dash: "dot", color: "#d29922", width: 1 },
+        },
+      ];
+      Plotly.react("plot_phase", traces, {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3", family: "Segoe UI" },
+        margin: { t: 40, r: 20, b: 48, l: 56 },
+        title: "Phase vs f (demo distance ≈ " + dist.toFixed(2) + " m)",
+        xaxis: { title: "f (Hz)" },
+        yaxis: { title: "φ (rad)" },
+        showlegend: true,
+        legend: { orientation: "h" },
+      });
+    }
+
+    /** Fills 1 MHz gaps; marks synthesized bins with interp:true for plotting. */
+    function interpolateMissing(sorted) {
+      const out = [{ ...sorted[0], interp: false }];
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1];
+        const cur = sorted[i];
+        const gap = cur.f - prev.f;
+        const nMiss = Math.round(gap / TONE_SPACING) - 1;
+        if (nMiss > 0 && nMiss < 20) {
+          const pp = Math.atan2(prev.q, prev.i);
+          let pc = Math.atan2(cur.q, cur.i);
+          let dph = pc - pp;
+          while (dph > M_PI) dph -= 2 * M_PI;
+          while (dph < -M_PI) dph += 2 * M_PI;
+          for (let m = 1; m <= nMiss; m++) {
+            const t = m / (nMiss + 1);
+            const ph = pp + t * dph;
+            out.push({
+              f: prev.f + m * TONE_SPACING,
+              i: Math.cos(ph),
+              q: Math.sin(ph),
+              interp: true,
+            });
+          }
+        }
+        out.push({ ...cur, interp: false });
+      }
+      return out;
+    }
+
+    function hann(n, k) {
+      return 0.5 * (1 - Math.cos((2 * M_PI * k) / (n - 1)));
+    }
+
+    function idftMag(Hre, Him, M) {
+      const n = Hre.length;
+      const mag = new Array(M);
+      for (let nn = 0; nn < M; nn++) {
+        let re = 0, im = 0;
+        for (let k = 0; k < n; k++) {
+          const ang = (2 * M_PI * k * nn) / M;
+          re += Hre[k] * Math.cos(ang) + Him[k] * Math.sin(ang);
+          im += Him[k] * Math.cos(ang) - Hre[k] * Math.sin(ang);
+        }
+        mag[nn] = Math.sqrt(re * re + im * im) / M;
+      }
+      return mag;
+    }
+
+    /** Nonlinear phase vs. tone index so chord-phase interpolation cannot recover the missing bin. */
+    function synthPhaseRad(k, n, delayBinTrue) {
+      const lin = (2 * M_PI * k * delayBinTrue) / (n * IFFT_PAD);
+      const km = (n > 1) ? k / (n - 1) : 0;
+      const nonlin = 0.55 * Math.sin(2 * M_PI * km) + 0.22 * Math.sin(5 * M_PI * km + 0.7);
+      return lin + nonlin;
+    }
+
+    function syncIfftGapSlider() {
+      const n = +document.getElementById("ifft_n").value;
+      const gapEl = document.getElementById("ifft_gap");
+      const maxGap = Math.max(1, n - 2);
+      gapEl.min = "1";
+      gapEl.max = String(maxGap);
+      let v = +gapEl.value;
+      if (v > maxGap) {
+        v = maxGap;
+        gapEl.value = String(v);
+      }
+      if (v < 1) {
+        v = 1;
+        gapEl.value = "1";
+      }
+      const lab = document.getElementById("ifft_gap_v");
+      if (lab) {
+        lab.textContent = "gap index = " + v + "  (n = " + n + ", raw tones = " + (n - 1) + ")";
+      }
+    }
+
+    function updateIfftPlots() {
+      syncIfftGapSlider();
+      const n = +document.getElementById("ifft_n").value;
+      const gapIdx = Math.min(Math.max(+document.getElementById("ifft_gap").value, 1), n - 2);
+      const useInterp = document.getElementById("ifft_interp").checked;
+      const f0 = 2.4e9;
+      const delayBinTrue = 2.8;
+      const raw = [];
+      for (let k = 0; k < n; k++) {
+        if (k === gapIdx) continue;
+        const f = f0 + k * TONE_SPACING;
+        const ang = synthPhaseRad(k, n, delayBinTrue);
+        raw.push({ f, i: Math.cos(ang), q: Math.sin(ang), interp: false });
+      }
+      raw.sort((a, b) => a.f - b.f);
+      const series = useInterp ? interpolateMissing(raw) : raw.map((p) => ({ ...p, interp: false }));
+      const nI = series.length;
+      const M = Math.min(nI * IFFT_PAD, 632);
+      const Hre = new Array(nI);
+      const Him = new Array(nI);
+      for (let k = 0; k < nI; k++) {
+        const mag2 = series[k].i * series[k].i + series[k].q * series[k].q;
+        const inv = mag2 > 1e-20 ? 1 / Math.sqrt(mag2) : 1;
+        const hn = hann(nI, k);
+        Hre[k] = series[k].i * inv * hn;
+        Him[k] = series[k].q * inv * hn;
+      }
+      const mag = idftMag(Hre, Him, M);
+      const noiseStart = Math.floor((3 * M) / 4);
+      let ns = 0;
+      for (let i = noiseStart; i < M; i++) ns += mag[i];
+      const noiseFloor = ns / (M - noiseStart);
+      const thr = noiseFloor * FIRST_PATH_THR;
+      let peak = -1;
+      for (let i = 1; i < M / 2; i++) {
+        if (mag[i] > thr && mag[i] >= mag[i - 1] && mag[i] >= mag[i + 1]) {
+          peak = i;
+          break;
+        }
+      }
+
+      const unit = (s) => {
+        const m2 = s.i * s.i + s.q * s.q;
+        const inv = m2 > 1e-20 ? 1 / Math.sqrt(m2) : 1;
+        return { i: s.i * inv, q: s.q * inv };
+      };
+      const meas = series.filter((s) => !s.interp);
+      const interpOnly = series.filter((s) => s.interp);
+      const iqTraces = [
+        {
+          x: meas.map((s) => unit(s).i),
+          y: meas.map((s) => unit(s).q),
+          mode: "markers+lines",
+          marker: { size: 7, color: "#58a6ff" },
+          line: { color: "#30363d" },
+          name: "Measured (unit circle)",
+        },
+        ...(interpOnly.length
+          ? [{
+            x: interpOnly.map((s) => unit(s).i),
+            y: interpOnly.map((s) => unit(s).q),
+            mode: "markers",
+            marker: { size: 11, color: "#d29922", symbol: "diamond" },
+            name: "Interpolated bins",
+          }]
+          : []),
+        {
+          type: "scatter",
+          mode: "lines",
+          x: Array.from({ length: 100 }, (_, t) => Math.cos((t / 99) * 2 * M_PI)),
+          y: Array.from({ length: 100 }, (_, t) => Math.sin((t / 99) * 2 * M_PI)),
+          line: { color: "#484f58", dash: "dot" },
+          name: "Unit circle",
+        },
+      ];
+      Plotly.react("plot_iq", iqTraces, {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3" },
+        margin: { t: 36, r: 20, b: 40, l: 40 },
+        title: "I/Q after unit-circle normalization (gap = " + gapIdx + ", interp " + (useInterp ? "on" : "off") + ")",
+        xaxis: { title: "I", scaleanchor: "y", scaleratio: 1 },
+        yaxis: { title: "Q" },
+        showlegend: true,
+        legend: { orientation: "h" },
+      });
+
+      const xs = Array.from({ length: M }, (_, i) => i);
+      const nInterp = interpOnly.length;
+      Plotly.react("plot_ifft", [
+        { x: xs, y: mag, mode: "lines", name: "|h[n]|", line: { color: "#3fb950" } },
+        { x: xs, y: xs.map(() => thr), mode: "lines", name: "Threshold", line: { dash: "dash", color: "#d29922" } },
+        ...(peak >= 0 ? [{ x: [peak], y: [mag[peak]], mode: "markers", name: "First path", marker: { size: 10, color: "#f85149" } }] : []),
+      ], {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3" },
+        margin: { t: 44, r: 20, b: 44, l: 52 },
+        title: "IDFT magnitude | n_IFFT = " + nI + ", raw = " + (n - 1) + ", filled = " + nInterp + ", peak = " + peak,
+        xaxis: { title: "Bin n" },
+        yaxis: { title: "Magnitude" },
+        showlegend: true,
+      });
+    }
+
+    function computeAdaptiveSigma(base, nGood, spanHz, avgQ) {
+      const Nref = 40, Fref = 72e6, Qref = 3;
+      const tf = Nref / Math.max(nGood, 1);
+      const sf = Fref / Math.max(spanHz, 1e6);
+      const qf = Qref / Math.max(avgQ, 0.5);
+      let pen = Math.sqrt(tf) * Math.sqrt(sf) * qf;
+      if (pen < 1) pen = 1;
+      return Math.min(5 * base, base * pen);
+    }
+
+    function updateSigma() {
+      const n = +document.getElementById("sig_n").value;
+      const spanMhz = +document.getElementById("sig_span").value;
+      const avgQ = +document.getElementById("sig_q").value;
+      const base = +document.getElementById("sig_base").value;
+      const spanHz = spanMhz * 1e6;
+      const sig = computeAdaptiveSigma(base, n, spanHz, avgQ);
+      document.getElementById("sig_n_v").textContent = n;
+      document.getElementById("sig_span_v").textContent = spanMhz;
+      document.getElementById("sig_q_v").textContent = avgQ.toFixed(2);
+      document.getElementById("sig_out").textContent = sig.toFixed(3);
+      const xs = [];
+      const ys = [];
+      for (let s = 10; s <= 72; s += 2) {
+        xs.push(s);
+        ys.push(computeAdaptiveSigma(base, n, s * 1e6, avgQ));
+      }
+      Plotly.react("plot_sigma", [{ x: xs, y: ys, mode: "lines+markers", line: { color: "#58a6ff" } }], {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3" },
+        margin: { t: 28, r: 16, b: 40, l: 48 },
+        title: "σ vs freq_span (MHz) at fixed n_good, avg_q",
+        xaxis: { title: "span (MHz)" },
+        yaxis: { title: "σ (m)" },
+      });
+    }
+
+    function fusionDemo() {
+      const dph = +document.getElementById("f_dph").value;
+      const dif = +document.getElementById("f_dif").value;
+      const agree = +document.getElementById("f_agree").value;
+      document.getElementById("f_dph_v").textContent = dph.toFixed(2) + " m";
+      document.getElementById("f_dif_v").textContent = dif.toFixed(2) + " m";
+      document.getElementById("f_agree_v").textContent = agree.toFixed(2) + " m";
+
+      let d = 0;
+      let sigma = 0.1;
+      const path = [];
+      const dis = Math.abs(dph - dif);
+      if (dis <= agree) {
+        d = 0.5 * (dph + dif);
+        sigma = 0.07;
+        path.push("Fusion: average (|Δ| ≤ fusion_agree_m)");
+      } else {
+        d = dif;
+        sigma = 0.10;
+        path.push("Fusion: IFFT only (multipath-robust path)");
+      }
+      document.getElementById("f_pre").textContent = "d = " + d.toFixed(3) + " m, σ ≈ " + sigma.toFixed(3);
+
+      let d2 = d;
+      let s2 = sigma;
+      const rttEn = document.getElementById("f_rtt_en").checked;
+      const drt = +document.getElementById("f_drt").value;
+      const tol = +document.getElementById("f_tol").value;
+      if (rttEn && tol > 0) {
+        if (Math.abs(d2 - drt) > tol) {
+          d2 = drt;
+          s2 = computeAdaptiveSigma(0.2, 24, 40e6, 2.4);
+          path.push("RTT gate: |PBR−RTT| > tolerance → use RTT");
+        } else path.push("RTT gate: within tolerance");
+      } else path.push("RTT: off / not checked");
+
+      document.getElementById("f_rtt").textContent = "d = " + d2.toFixed(3) + " m";
+
+      let d3 = d2;
+      let s3 = s2;
+      const rsEn = document.getElementById("f_rs_en").checked;
+      const drs = +document.getElementById("f_drs").value;
+      const srs = +document.getElementById("f_srs").value;
+      if (rsEn && srs > 0) {
+        const wp = 1 / (s3 * s3);
+        const wr = 1 / (srs * srs);
+        const wt = wp + wr;
+        const f = wp / wt;
+        if (f > 0.3 && f < 0.7) {
+          d3 = (wp * d3 + wr * drs) / wt;
+          s3 = 1 / Math.sqrt(wt);
+          path.push("RSSI: inverse-variance blend");
+        } else if (f <= 0.3) {
+          d3 = drs;
+          s3 = srs;
+          path.push("RSSI: dominates (f ≤ 0.3)");
+        } else path.push("RSSI: PBR dominates (f ≥ 0.7), unchanged");
+      } else path.push("RSSI: off");
+
+      document.getElementById("f_fin").textContent = "d = " + d3.toFixed(3) + " m";
+      document.getElementById("f_sig").textContent = s3.toFixed(3) + " m";
+      document.getElementById("f_paths").innerHTML = path.map((p) => "• " + p).join("<br/>");
+    }
+
+    const kalState = { x: 2.0, P: 0.5, histX: [], histZ: [], histGate: [], t: 0 };
+    const KAL_Q = 0.01;
+    const KAL_SIG_OUT = 1.0;
+    const gateSigma = 3.0;
+
+    function kalmanStep() {
+      kalState.P += KAL_Q;
+      const z = kalState.x + (Math.random() - 0.5) * 0.55;
+      let sig = 0.12;
+      const innov = z - kalState.x;
+      const gate = gateSigma * Math.sqrt(kalState.P + sig * sig);
+      if (Math.abs(innov) > gate) sig = KAL_SIG_OUT;
+      const r = sig * sig;
+      const K = kalState.P / (kalState.P + r);
+      kalState.x += K * (z - kalState.x);
+      kalState.P = (1 - K) * kalState.P;
+      kalState.t++;
+      kalState.histZ.push(z);
+      kalState.histX.push(kalState.x);
+      kalState.histGate.push(gate);
+      if (kalState.histZ.length > 60) {
+        kalState.histZ.shift();
+        kalState.histX.shift();
+        kalState.histGate.shift();
+      }
+      const t = kalState.histZ.map((_, i) => i);
+      Plotly.react("plot_kal", [
+        { x: t, y: kalState.histZ, mode: "lines+markers", name: "z (measurement)", line: { color: "#8b949e" } },
+        { x: t, y: kalState.histX, mode: "lines", name: "x (Kalman)", line: { color: "#58a6ff", width: 2 } },
+        { x: t, y: kalState.histZ.map((zi, i) => zi + kalState.histGate[i]), mode: "lines", name: "z+|gate|", line: { dash: "dot", color: "#d29922" } },
+        { x: t, y: kalState.histZ.map((zi, i) => zi - kalState.histGate[i]), mode: "lines", name: "z−|gate|", line: { dash: "dot", color: "#d29922" } },
+      ], {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3" },
+        margin: { t: 36, r: 20, b: 40, l: 52 },
+        title: "Kalman distance (demo noise + innovation band)",
+        xaxis: { title: "Step" },
+        yaxis: { title: "m" },
+        showlegend: true,
+        legend: { orientation: "h" },
+      });
+    }
+
+    let kalTimer = null;
+    function kalReset() {
+      kalState.x = 2.0; kalState.P = 0.5; kalState.histX = []; kalState.histZ = []; kalState.histGate = []; kalState.t = 0;
+      Plotly.purge("plot_kal");
+    }
+
+    function erfApprox(x) {
+      const sign = x < 0 ? -1 : 1;
+      x = Math.abs(x);
+      const t = 1 / (1 + 0.3275911 * x);
+      const poly = 0.254829592 * t - 0.284496736 * t * t + 1.421413741 * t ** 3
+        - 1.453152027 * t ** 4 + 1.061405429 * t ** 5;
+      return sign * (1 - poly * Math.exp(-x * x));
+    }
+
+    function gaussianCdf(x, mean, v) {
+      if (v < 1e-12) return x >= mean ? 1 : 0;
+      const z = (x - mean) / Math.sqrt(v);
+      return 0.5 * (1 + erfApprox(z * Math.SQRT1_2));
+    }
+
+    const decState = { zone: 0, cand: 0, cnt: 0 };
+
+    function decisionDemo() {
+      const mu = +document.getElementById("d_mu").value;
+      const pv = +document.getElementById("d_pv").value;
+      const th0 = +document.getElementById("d_th").value;
+      const hy = +document.getElementById("d_hy").value;
+      const cm = +document.getElementById("d_cm").value;
+      const mc = +document.getElementById("d_mc").value | 0;
+
+      let eff = th0;
+      if (decState.zone === 1) eff = th0 + hy;
+      else if (decState.zone === 2) eff = th0 - hy;
+
+      const pNear = gaussianCdf(eff, mu, pv);
+      const pFar = 1 - pNear;
+
+      let proposed = decState.zone;
+      if (pNear >= cm) proposed = 1;
+      else if (pFar >= cm) proposed = 2;
+
+      if (proposed !== decState.zone) {
+        if (proposed === decState.cand) decState.cnt++;
+        else { decState.cand = proposed; decState.cnt = 1; }
+        if (decState.cnt >= mc) {
+          decState.zone = proposed;
+          decState.cand = 0;
+          decState.cnt = 0;
+        }
+      } else {
+        decState.cand = 0;
+        decState.cnt = 0;
+      }
+
+      const zoneName = decState.zone === 0 ? "UNKNOWN" : decState.zone === 1 ? "NEAR" : "FAR";
+      document.getElementById("d_eff").textContent = eff.toFixed(3);
+      document.getElementById("d_pn").textContent = pNear.toFixed(4);
+      document.getElementById("d_zone").textContent = zoneName;
+      const candName = decState.cand === 0 ? "—" : decState.cand === 1 ? "NEAR" : "FAR";
+      document.getElementById("d_state").textContent =
+        "Candidate: " + candName + "  ·  consecutive: " + decState.cnt + " / " + mc +
+        "  ·  Zone state persists across slider moves (like firmware). Reload page to reset.";
+
+      const xs = [];
+      const ys = [];
+      for (let d = 0; d < 6; d += 0.02) {
+        xs.push(d);
+        ys.push(gaussianCdf(d, mu, pv));
+      }
+      const xFill = xs.filter((d) => d <= eff);
+      const yFill = xFill.map((d) => gaussianCdf(d, mu, pv));
+      Plotly.react("plot_cdf", [
+        {
+          x: xFill.concat(xFill.slice().reverse()),
+          y: yFill.concat(xFill.map(() => 0)),
+          fill: "toself",
+          mode: "lines",
+          name: "P(d<θ) area",
+          line: { width: 0 },
+          fillcolor: "rgba(63,185,80,0.28)",
+          hoverinfo: "skip",
+        },
+        { x: xs, y: ys, mode: "lines", name: "Φ(d)", line: { color: "#58a6ff", width: 2 } },
+        { x: [eff, eff], y: [0, 1], mode: "lines", name: "θ_eff", line: { dash: "dash", color: "#f85149", width: 2 } },
+      ], {
+        paper_bgcolor: "#0d1117",
+        plot_bgcolor: "#161b22",
+        font: { color: "#e6edf3" },
+        margin: { t: 36, r: 20, b: 44, l: 52 },
+        title: "Distance CDF (Gaussian assumption)",
+        xaxis: { title: "d (m)" },
+        yaxis: { title: "CDF", range: [0, 1] },
+        showlegend: true,
+      });
+    }
+
+    function initMath() {
+      renderMath("math-sec1", String.raw`n_{\text{good}} = \#\{ i : q_i \ge 2 \},\quad n_{\text{good}} \ge 8`);
+      renderMath("math-sec2", String.raw`\phi_k=\operatorname{atan2}(Q_k,I_k),\quad \phi\ \text{unwrap},\quad \phi(f)\approx a f + b,\quad d=\max\!\left(\frac{|a|\,c}{4\pi}-\text{offset},\,0.05\right)`);
+      renderMath("math-sec3", String.raw`\tilde H_k=\frac{I_k+jQ_k}{\|I_k+jQ_k\|}\,w_k^{\text{Hann}},\quad h[n]=\frac1M\sum_{k=0}^{M-1}\tilde H_k e^{j2\pi kn/M},\quad d\propto n_{\text{peak}}`);
+      renderMath("math-sec4", String.raw`\text{pen}=\max\!\Big(1,\sqrt{\tfrac{N_{\text{ref}}}{n}}\sqrt{\tfrac{f_{\text{ref}}}{\Delta f}}\tfrac{q_{\text{ref}}}{\bar q}\Big),\quad \sigma=\min(5\sigma_{\text{base}},\,\sigma_{\text{base}}\cdot\text{pen})`);
+      renderMath("math-sec5", String.raw`|d_{\phi}-d_{\text{IFFT}}|\le \tau_{\text{fuse}} \Rightarrow d=\tfrac12(d_\phi+d_{\text{IFFT}})\ \text{else}\ d_{\text{IFFT}};\ \text{RTT/RSSI per firmware path}`);
+      renderMath("math-sec6", String.raw`P\leftarrow P+Q,\quad K=\frac{P}{P+\sigma^2},\quad x\leftarrow x+K(z-x),\quad P\leftarrow(1-K)P`);
+      renderMath("math-sec7", String.raw`p_{\text{near}}=\Pr(d<\theta_{\text{eff}}),\quad \theta_{\text{eff}}=\theta_0\pm h\ (\text{hysteresis}),\quad \text{min\_consecutive}`);
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      if (window.mermaid) {
+        mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" });
+        await mermaid.run({ querySelector: ".mermaid" });
+      }
+      initMath();
+
+      ["ps_noise", "ps_out"].forEach((id) => document.getElementById(id).addEventListener("input", updatePhasePlot));
+      ["ifft_interp", "ifft_gap", "ifft_n"].forEach((id) => {
+        const el = document.getElementById(id);
+        el.addEventListener("input", updateIfftPlots);
+        el.addEventListener("change", updateIfftPlots);
+      });
+
+      ["sig_n", "sig_span", "sig_q", "sig_base"].forEach((id) => document.getElementById(id).addEventListener("input", updateSigma));
+      document.getElementById("sig_base").addEventListener("change", updateSigma);
+
+      ["f_dph", "f_dif", "f_agree", "f_rtt_en", "f_drt", "f_tol", "f_rs_en", "f_drs", "f_srs"].forEach((id) => {
+        const el = document.getElementById(id);
+        el.addEventListener("input", fusionDemo);
+        el.addEventListener("change", fusionDemo);
+      });
+
+      document.getElementById("kal_step").addEventListener("click", kalmanStep);
+      document.getElementById("kal_reset").addEventListener("click", kalReset);
+      document.getElementById("kal_auto").addEventListener("change", (e) => {
+        if (e.target.checked) kalTimer = setInterval(kalmanStep, 50);
+        else { clearInterval(kalTimer); kalTimer = null; }
+      });
+
+      ["d_mu", "d_pv", "d_th", "d_hy", "d_cm", "d_mc"].forEach((id) => {
+        const el = document.getElementById(id);
+        el.addEventListener("input", decisionDemo);
+        el.addEventListener("change", decisionDemo);
+      });
+
+      updatePhasePlot();
+      updateIfftPlots();
+      updateSigma();
+      fusionDemo();
+      decisionDemo();
+    });
+  </script>
+</body>
+</html>
